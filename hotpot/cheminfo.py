@@ -6,11 +6,13 @@ python v3.9.0
 @Date   : 2023/3/14
 @Time   : 4:09
 """
-import copy
-import json
-import logging
 import os
 import re
+import copy
+import json
+import weakref
+import logging
+import functools
 from abc import ABC, abstractmethod
 from io import IOBase
 from os import PathLike
@@ -28,6 +30,7 @@ from openbabel import openbabel as ob, pybel as pb
 from rdkit import Chem
 from rdkit.Chem import Draw
 
+from .maths import BaseNum
 from hotpot import data_root
 from hotpot.tasks import lmp
 from hotpot.tasks.qm.gaussian import Gaussian, GaussianRunError, GaussRun, Debugger
@@ -47,10 +50,10 @@ class AddBondFail(OperateOBMolFail):
     """ Raise when add a bond into Molecule fail """
 
 
-# periodic_table = json.load(open(opj(data_root, 'periodic_table.json'), encoding='utf-8'))
-periodic_table = _lib.get('PeriodicTable')  # hotpot.utils.library.PeriodicTabel
+_molecule_dict = weakref.WeakValueDictionary()  # {int: Molecule}
 
-_ob_builder = ob.OBBuilder()
+
+periodic_table = _lib.get('PeriodicTable')  # hotpot.utils.library.PeriodicTabel
 
 _stable_charges = {
     "H": 1,  "He": 0,
@@ -242,9 +245,14 @@ class Wrapper(ABC):
         return list(self._attr_setters.keys())
 
     @property
-    def temp_label(self):
+    def temp_label(self) -> int:
         """ Retrieve the temp label """
-        return self._get_ob_comment_data('temp_label')
+        return int(self._get_ob_comment_data('temp_label'))
+
+    @temp_label.setter
+    def temp_label(self, value: int):
+        """ Set the temp label """
+        self._set_ob_comment_data('temp_label', str(value))
 
     def update_attr_data(self, data: dict):
         """ update the attribute data by give dict """
@@ -253,6 +261,27 @@ class Wrapper(ABC):
                 data.pop(data_attr)
 
         self._data.update(data)
+
+
+class ObjCollection(ABC):
+    """ Representing a collection of Chemical objects, like Molecule, Atom, Ring, Crystal and so on """
+    def __init__(self, *objs):
+        self._objs = objs
+
+    def __repr__(self):
+        return "[" + ", ".join(str(obj) for obj in self._objs) + "]"
+
+    def __contains__(self, item):
+        return item in self._objs
+
+    def __len__(self):
+        return len(self._objs)
+
+    def __iter__(self):
+        return iter(self._objs)
+
+    def __getitem__(self, item: int):
+        return self._objs[item]
 
 
 class MolLinker:
@@ -381,6 +410,8 @@ class Molecule(Wrapper, ABC):
         self._load_atoms()
         self._load_bonds()
 
+        self._set_refcode()
+
     def __repr__(self):
         return f'Mol({self.ob_mol.GetSpacedFormula()})'
 
@@ -471,6 +502,9 @@ class Molecule(Wrapper, ABC):
             return True
         return False
 
+    def __hash__(self):
+        return hash(f"hotpot.Molecule(refcode={self.refcode})")
+
     def _add_temp_atom_labels(self):
         """
         Add temp atom label, These label will assist in the implementation of certain functions,
@@ -514,16 +548,6 @@ class Molecule(Wrapper, ABC):
         ob_unit_cell = ob.OBUnitCell()
         self.ob_mol.CloneData(ob_unit_cell)
 
-    def _delete_atoms_temp_label(self):
-        """ Remove temp label of all atoms """
-        for a in self.atoms:
-            a.remove_ob_data('temp_label')
-
-    def _delete_bonds_temp_label(self):
-        """ Remove temp label of all bonds """
-        for b in self.bonds:
-            b.remove_ob_data('temp_label')
-
     def _get_critical_params(self, name: str):
         critical_params = self._data.get('critical_params')
         if critical_params is None:
@@ -555,9 +579,13 @@ class Molecule(Wrapper, ABC):
         return clone_mol
 
     def _load_atoms(self) -> Dict[int, 'Atom']:
+        atom_dict = self._data['atoms'] = {oba.GetId(): Atom(oba, mol=self) for oba in ob.OBMolAtomIter(self.ob_mol)}
+        return atom_dict
+
+    def __load_atoms(self) -> Dict[int, 'Atom']:
         """
         Construct atoms dict according to the OBAtom in the OBMol,
-        where the keys of the dict are the ob_id of OBAtom and the values are the the constructed Atom objects
+        where the keys of the dict are the ob_id of OBAtom and the values are the constructed Atom objects
         the constructed dict would be place into the _data dict
         Returns:
             the atoms dict
@@ -576,9 +604,13 @@ class Molecule(Wrapper, ABC):
         return new_atoms
 
     def _load_bonds(self) -> Dict[int, 'Bond']:
+        bond_dict = self._data['bonds'] = {obb.GetId(): Bond(obb, self) for obb in ob.OBMolBondIter(self.ob_mol)}
+        return bond_dict
+
+    def __load_bonds(self) -> Dict[int, 'Bond']:
         """
         Construct bonds dict according to the OBBond in the OBMol,
-        where the keys of the dict are the ob_id of OBBond and the values are the the constructed Bond objects
+        where the keys of the dict are the ob_id of OBBond and the values are the constructed Bond objects
         the constructed dict would be place into the _data dict
         Returns:
             dict of bonds
@@ -673,23 +705,6 @@ class Molecule(Wrapper, ABC):
     @property
     def _protected_data(self):
         return 'ob_obj', 'atoms', 'bonds', 'angles'
-
-    def _reorder_atom_ob_id(self):
-        """ Reorder the ob id of atoms """
-        new_atom_dict = {}
-        for ob_id, atom in enumerate(self.atoms):
-            atom.ob_atom.SetId(ob_id)
-            new_atom_dict[ob_id] = atom
-
-        self._data['atoms'] = new_atom_dict
-
-    def _reorder_bond_ob_id(self):
-        new_atom_dict = {}
-        for ob_id, bond in enumerate(self.bonds):
-            bond.ob_bond.SetId(ob_id)
-            new_atom_dict[ob_id] = bond
-
-        self._data['bonds'] = new_atom_dict
 
     def _reorganize_atom_indices(self):
         """ reorganize or rearrange the indices for all atoms """
@@ -858,6 +873,12 @@ class Molecule(Wrapper, ABC):
 
     def _set_identifier(self, identifier):
         self.ob_mol.SetTitle(identifier)
+
+    def _set_refcode(self):
+        """ put an int value into the OBMol as the refcode """
+        if not self.refcode:
+            self._set_ob_int_data('refcode', 0 if not _molecule_dict else max(_molecule_dict.keys()) + 1)
+            _molecule_dict[self.refcode] = self
 
     def _set_spin_multiplicity(self, spin):
         self.ob_mol.SetTotalSpinMultiplicity(spin)
@@ -1058,13 +1079,18 @@ class Molecule(Wrapper, ABC):
             correct_for_ph: Correct for pH by applying the OpenBabel::OBPhModel transformations
             balance_hydrogen: whether to balance the bond valance of heavy atom to their valence
         """
+        is_aromatic = {atom.ob_id: atom.is_aromatic for atom in self.atoms}
         self.ob_mol.AddHydrogens(polar_only, correct_for_ph, ph)
-        self._load_atoms()
-        self._load_bonds()
 
         if balance_hydrogen:
             for atom in self.atoms:
                 atom.balance_hydrogen()
+
+        for atom in self.atoms:
+            if is_aromatic.get(atom.ob_id):
+                atom.set_aromatic()
+
+        self._load_bonds()
 
     def add_pseudo_atom(self, symbol: str, mass: float, coordinates: Union[Sequence, np.ndarray], **kwargs):
         """ Add pseudo atom into the molecule """
@@ -1097,6 +1123,9 @@ class Molecule(Wrapper, ABC):
     def assign_bond_types(self):
         self.ob_mol.PerceiveBondOrders()
 
+    def assign_aromatic_bonds(self):
+        """"""
+
     def atom(self, id_label_atom: Union[int, str, "Atom"]) -> 'Atom':
         """ get atom by label or idx """
         if isinstance(id_label_atom, Atom):
@@ -1127,7 +1156,18 @@ class Molecule(Wrapper, ABC):
     def atom_counts(self):
         return self.ob_mol.NumAtoms()
 
-    def atom_element_replace(self, old_id_label: Union[int, str], new_symbol: str):
+    def replace_atom(self, old_id_label: Union[int, str], new_atom: "Atom"):
+        """ Replace specific atom to the new given """
+        old_atom = self.atom(old_id_label)
+        new_atom.ob_atom.SetId(old_atom.ob_id)
+
+        # TODO: this may case certain C++ error
+        self.ob_mol.DestroyAtom(old_atom.ob_atom)
+        self.ob_mol.AddAtom(new_atom.ob_atom)
+
+        self._load_atoms()
+
+    def atom_element_replace(self, old_id_label: Union[int, str], new_symbol: str, **kwargs):
         """
         Replace one of atom in this Molecule to other element
         Args:
@@ -1139,9 +1179,8 @@ class Molecule(Wrapper, ABC):
             None
         """
         atom = self.atom(old_id_label)
-        new_atom = Atom(symbol=new_symbol)
 
-        atom.set(symbol=new_symbol, format_charge=1)
+        atom.set(symbol=new_symbol, **kwargs)
 
     @property
     def atomic_numbers(self) -> Tuple[int]:
@@ -1356,31 +1395,27 @@ class Molecule(Wrapper, ABC):
     def build_3d(self, force_field: str = 'UFF', steps: int = 500, balance_hydrogen=False):
         """ build 3D coordinates for the molecule """
         # Preserve atoms data before building
-        preserve_atoms_data = self._preserve_atoms_data()
-        preserve_bonds_data = self._preserve_bonds_data()
-        # preserve_angles_data = self._preserve_angles_data()
-        # preserve_torsion_data = self._preserve_torsion_data()
+        # preserve_atoms_data = self._preserve_atoms_data()
+        # preserve_bonds_data = self._preserve_bonds_data()
 
-        # Destroy atoms and bonds wrappers
-        self._data['atoms'] = {}
-        self._data['bonds'] = {}
+        # # Destroy atoms and bonds wrappers
+        # self._data['atoms'] = {}
+        # self._data['bonds'] = {}
 
         # Build 3d conformer
         pymol = pb.Molecule(self.ob_mol)
         pymol.make3D(force_field, steps)
 
-        # Reload atoms and bonds
-        self._load_atoms()
-        self._load_bonds()
-
-        # Transfer preserve data to new
-        self._transfer_preserve_data_to_new_atoms(self, preserve_atoms_data)
-        self._transfer_preserve_data_to_new_bonds(self, preserve_bonds_data)
-        # self._transfer_preserve_data_to_new_angles(self, preserve_angles_data)
-        # self._transfer_preserve_data_to_new_torsions(self, preserve_torsion_data)
+        # # Reload atoms and bonds
+        # self._load_atoms()
+        # self._load_bonds()
+        #
+        # # Transfer preserve data to new
+        # self._transfer_preserve_data_to_new_atoms(self, preserve_atoms_data)
+        # self._transfer_preserve_data_to_new_bonds(self, preserve_bonds_data)
 
         # Delete temp label
-        self._delete_atoms_temp_label()
+        # self._delete_atoms_temp_label()
 
         # Remove redundant hydrogen or supply the lack hydrogens
         if balance_hydrogen:
@@ -1476,6 +1511,16 @@ class Molecule(Wrapper, ABC):
         if pop:
             return all_coordinates
 
+    def clear_atom_temp_labels(self):
+        """ Remove temp label of all atoms """
+        for a in self.atoms:
+            a.remove_ob_data('temp_label')
+
+    def clear_bond_temp_labels(self):
+        """ Remove temp label of all bonds """
+        for b in self.bonds:
+            b.remove_ob_data('temp_label')
+
     @property
     def components(self):
         """ get all fragments don't link each by any bonds """
@@ -1491,7 +1536,7 @@ class Molecule(Wrapper, ABC):
                 a.remove_ob_data('temp_label')
 
         # remove temp labels of all atoms
-        self._delete_atoms_temp_label()
+        self.clear_atom_temp_labels()
 
         return components
 
@@ -1684,6 +1729,24 @@ class Molecule(Wrapper, ABC):
     def energy(self):
         """ Return energy with kcal/mol as default """
         return self.ob_mol.GetEnergy()
+
+    @property
+    def expand_aromatic_rings(self) -> list["ExpandRing"]:
+        """ Return all aromatic ExpandRings in the Molecule """
+        expand_aromatic_rings = []
+        for ring in self.lssr:
+            if ring.is_aromatic and all(ring not in er for er in expand_aromatic_rings):
+                expand_aromatic_rings.append(ring.expand_aromatic_ring)
+        return expand_aromatic_rings
+
+    @property
+    def expand_rings(self) -> list["ExpandRing"]:
+        """ Return all ExpandRings in the Molecule """
+        expand_rings = []
+        for ring in self.lssr:
+            if all(ring not in er for er in expand_rings):
+                expand_rings.append(ring.expand_ring)
+        return expand_rings
 
     def feature_matrix(self, *feature_names: Sequence) -> np.ndarray:
         """ Retrieve the feature matrix (collections of feature vector for atoms),
@@ -2157,8 +2220,8 @@ class Molecule(Wrapper, ABC):
             steps: int = 100,
             balance_hydrogen: bool = False,
             to_optimal: bool = False,
-            tolerable_displacement: float = 5e-2,
-            max_iter: int = 100
+            tolerable_displacement: float = 1e-1,
+            max_iter: int = 10
     ):
         """
         Locally optimize the coordinates. referring openbabel.pybel package
@@ -2274,6 +2337,16 @@ class Molecule(Wrapper, ABC):
             return energies
         else:
             return None
+
+    @property
+    def networkx_graph(self) -> nx.Graph:
+        """ Return networkx Graph of the Molecule """
+        edges = self.link_matrix[:, :len(self.bonds)].T
+
+        graph = nx.Graph()
+        graph.add_edges_from(edges)
+
+        return graph
 
     def normalize_labels(self):
         """ Reorder the atoms labels in the molecule """
@@ -2444,6 +2517,10 @@ class Molecule(Wrapper, ABC):
 
         return mol
 
+    @property
+    def refcode(self) -> int:
+        return self._get_ob_int_data('refcode')
+
     def register_critical_params(self, name: str, temperature: float, pressure: float, acentric: float):
         """ Register new critical parameters into the critical parameters sheet """
         data = json.load(open(opj(data_root, 'thermo', 'critical.json')))
@@ -2497,7 +2574,12 @@ class Molecule(Wrapper, ABC):
         self._load_bonds()
 
     def remove_hydrogens(self):
+        is_aromatic = {atom.ob_id: atom.is_aromatic for atom in self.atoms}
         self.ob_mol.DeleteHydrogens()
+
+        for atom in self.atoms:
+            if is_aromatic.get(atom.ob_id):
+                atom.set_aromatic()
 
     def remove_metals(self):
         """ remove all of metal atoms in the molecule """
@@ -2581,17 +2663,20 @@ class Molecule(Wrapper, ABC):
             des_atom: Union[int, str, 'Atom'],
             get_all: bool = False,
             return_atoms: bool = False
-    ):
+    ) -> Union[list[list["Atom"]], list[list[int]], list["Atom"], list[int]]:
         """
         retrieve the shortest path from the source atom to the destination atom
         Args:
             src_atom: source atom, or its index or label
             des_atom: destination atom, or its index or label
-            get_all:
-            return_atoms:
+            get_all: whether to return all shortest paths or one of them
+            return_atoms: whether to return the atoms in the shortest path or just their ob_id
 
         Returns:
-
+            1) list[int], when get_all = False, return_atoms = False
+            2) list[Atom], when get_all = False, return_atoms = True
+            3) list[list[int]], when get_all = True, return_atoms = False
+            4) list[list[Atom]], when git_all = True, return_atoms = True
         """
         src_atom = self.atom(src_atom)
         des_atom = self.atom(des_atom)
@@ -2599,10 +2684,7 @@ class Molecule(Wrapper, ABC):
         src_node = src_atom.ob_id
         des_node = des_atom.ob_id
 
-        edges = self.link_matrix[:, :len(self.bonds)].T
-
-        mol_graph = nx.Graph()
-        mol_graph.add_edges_from(edges)
+        mol_graph = self.networkx_graph
 
         atoms_dict = self.atoms_dict
         if get_all:
@@ -3038,12 +3120,17 @@ class Atom(Wrapper, ABC):
     def balance_hydrogen(self):
         """ Remove or add hydrogens link with this atom, if the bond valence is not equal to the atomic valence """
         if self.is_heavy and not self.is_metal:  # Do not add or remove hydrogens to the metal, H or inert elements
-            while self.valence > self.stable_valence and self.neighbours_hydrogen:
+            while self.bond_orders > self.stable_valence and self.neighbours_hydrogen:
                 self.molecule.remove_atoms(self.neighbours_hydrogen[0])
 
             # add hydrogen, if the bond valence less than the atomic valence
-            while self.valence < self.stable_valence:
+            while self.bond_orders < self.stable_valence:
                 self.add_hydrogen()
+
+    @property
+    def bond_orders(self) -> int:
+        """ Return the sum of bond order linking with this atom """
+        return sum(b.type if b.type else 0 if b.is_covalent else 1 for b in self.bonds)
 
     @property
     def bonds(self):
@@ -3145,6 +3232,16 @@ class Atom(Wrapper, ABC):
         """ the number of covalent electrons for this atoms """
         return sum(b.type if b.is_covalent else 0 for b in self.bonds)
 
+    @classmethod
+    def duplicate(cls, old_atom: "Atom", copy_ob_id: bool = False) -> "Atom":
+        """ create an Atom instance by copy an old one """
+        new_oba = ob.OBAtom()
+        new_oba.Duplicate(old_atom.ob_atom)
+        if copy_ob_id:
+            new_oba.SetId(old_atom.ob_id)
+
+        return cls(new_oba)
+
     def element_features(self, *feature_names) -> np.ndarray:
         """ Retrieve the feature vector """
         atom_feature = periodic_table[self.symbol]
@@ -3159,6 +3256,10 @@ class Atom(Wrapper, ABC):
                 features.append(atom_feature[feature_name])
 
         return np.array(features)
+
+    @property
+    def expanded_ring(self):
+        """ get the expanded ring """
 
     def _atomic_orbital_feature(self, outermost_layer=True, nonexistent_orbit=0):
         """    Calculating the feature about atomic orbital structures    """
@@ -3270,6 +3371,50 @@ class Atom(Wrapper, ABC):
     def is_chiral(self):
         return self.ob_atom.IsChiral()
 
+    def is_graph_identical_with(self, other: 'Atom'):
+        """ Judge whether this atom is identical in graph environment """
+        seen_atoms = set()
+
+        def atom_sorted_func(a1: Atom, a2: Atom):
+            """
+            Compare given two atoms, a1, a2, in the view of graph.
+
+            an atom is seen to be prior to the other, if one of the following condition is matched:
+                1) its atomic number is smaller than the other;
+                2) its number of neighbours is more than the other;
+                3) the i-th sorted neighbour of the atom is prior to the i-th one of the other, this
+                   comparison is performed from the prior to the subprime.
+
+            Returns:
+                1 if a1 is prior over 2; -1 if a1 is subsequent after a2; 0 if a1 is identical to a2 in graph
+            """
+            nonlocal seen_atoms
+
+            if (a1, a2) in seen_atoms:
+                if a1.is_in_rings and a2.is_in_ring \
+                    and a1.member_of_ring_count == a2.member_of_ring_count \
+                    and a1.rings:
+                    return 0
+            else:
+                seen_atoms.update([(a1, a2), (a2, a1)])
+
+            if a1.atomic_number != a2.atomic_number:
+                return 1 if a1.atomic_number < a2.atomic_number else -1
+            elif len(a1.neighbours) != len(a2.neighbours):
+                return 1 if len(a1.neighbours) < len(a2.neighbours) else -1
+            else:
+                list_na1 = sorted(a1.neighbours, key=functools.cmp_to_key(atom_sorted_func))
+                list_na2 = sorted(a2.neighbours, key=functools.cmp_to_key(atom_sorted_func))
+
+                for na1, na2 in zip(list_na1, list_na2):
+                    judge = atom_sorted_func(na1, na2)
+                    if judge:
+                        return judge
+
+                return 0
+
+        return self is other or not atom_sorted_func(self, other)
+
     @property
     def is_hydrogen(self):
         return self.ob_atom.GetAtomicNum() == 1
@@ -3278,6 +3423,11 @@ class Atom(Wrapper, ABC):
     def is_heavy(self):
         """ Whether the atom is heavy atom """
         return not self.is_hydrogen
+
+    @property
+    def is_in_ring(self):
+        """ Whether the atom is in rings """
+        return self.ob_atom.IsInRing()
 
     @property
     def is_polar_hydrogen(self) -> bool:
@@ -3315,6 +3465,11 @@ class Atom(Wrapper, ABC):
     def max_bonds(self):
         """ the max allowed bond order"""
         return ob.GetMaxBonds(self.atomic_number)
+
+    @property
+    def member_of_ring_count(self) -> int:
+        """ How many rings this atom is on """
+        return self.ob_atom.MemberOfRingCount()
 
     @property
     def molecule(self) -> Molecule:
@@ -3389,10 +3544,14 @@ class Atom(Wrapper, ABC):
         """ Replace the core data dict directly """
         self._data = data
 
+    @property
+    def rings(self) -> list['Ring']:
+        """ the lssr rings this atom is on """
+        return [ring for ring in self.molecule.lssr if self.ob_id in ring.atoms_ids]
+
     def set(self, **kwargs):
         """
-        Set atom attributes by kwargs
-        Kwargs:
+        Set atom attributes by kwargs:
             atomic_number(int): set atomic number
             symbol(str): set atomic symbol
             coordinates(Sequence, numpy.ndarray): coordinates of the atom
@@ -3401,6 +3560,11 @@ class Atom(Wrapper, ABC):
             spin_density:
         """
         self._set_attrs(**kwargs)  # set attributes
+
+    def set_aromatic(self):
+        """ Set this atom to be aromatic """
+        self.ob_atom.IsAromatic()
+        self.ob_atom.SetAromatic()
 
     @property
     def spin_density(self):
@@ -3461,10 +3625,8 @@ class Atom(Wrapper, ABC):
         return ob.GetSymbol(self.atomic_number)
 
     @property
-    def valence(self) -> int:
-        # if self.has_unknown_bond:
-        #     raise AttributeError('Cannot calculate the bond valence, because of the existence of unknown bonds')
-        return sum(b.type if b.type else 0 if b.is_covalent else 1 for b in self.bonds)
+    def valence(self) -> str:
+        return self.ob_atom
 
 
 class PseudoAtom(Wrapper, ABC):
@@ -3512,11 +3674,10 @@ class Bond(Wrapper, ABC):
         return f"Bond({self.atoms[0].label}, {self.atoms[1].label}, {self.type_name})"
 
     def __eq__(self, other: 'Bond'):
-        if isinstance(other, Bond):
-            return self.pair_key == other.pair_key
+        return self.molecule is other.molecule and self.ob_id is other.ob_id
 
     def __hash__(self):
-        return hash(self.pair_key)
+        return hash(f"Molecule(refcode={self.molecule.refcode}): Bond(obi={self.ob_id})")
 
     def __getitem__(self, item):
         return self._data.get(item)
@@ -3601,6 +3762,11 @@ class Bond(Wrapper, ABC):
         return self.ob_bond.GetEquibLength()
 
     @property
+    def joint_bonds(self):
+        """ Return the bonds joint with this bonds """
+        return [bond for atom in self.atoms for bond in atom.bonds if bond.ob_id != self.ob_id]
+
+    @property
     def ob_id(self):
         return self.ob_bond.GetId()
 
@@ -3671,26 +3837,44 @@ class Ring(Wrapper, ABC):
         }
 
     def __repr__(self):
-        bond_symbol = {1: "-", 2: "=", 3: "#", 5: ":"}
+        bond_symbol = {1: "", 2: "=", 3: "#", 5: ":"}
 
         ordered_atoms = self.ordered_atoms
         begin_atom = ordered_atoms[0]
-        ring_str = ""
+        ring_str = f"{begin_atom.symbol}"
         for end_atom in ordered_atoms[1:]:
             bond = self.molecule.bond(begin_atom, end_atom)
-            ring_str += f"{begin_atom.label}{bond_symbol[bond.type]}"
+            ring_str += f"{bond_symbol[bond.type]}{end_atom.symbol}"
             begin_atom = end_atom
 
-        bond = self.molecule.bond(begin_atom, ordered_atoms[0])
-        ring_str += f"{begin_atom.label}{bond_symbol[bond.type]}{ordered_atoms[0].label}"
-
-        return f"Ring({ring_str})"
+        return f"Ring({ring_str}, {'Aromatic' if self.is_aromatic else 'Aliphatic'})"
 
     def __len__(self):
         return self.size
 
+    def __eq__(self, other):
+        if self.molecule is not other.molecule or self.size != other.size \
+                or len(set(self.atoms_ids) & set(other.atoms_ids)) != self.size:
+            return False
+
+        return True
+
+    def __hash__(self):
+        return hash(f"Molecule(refcode={self.molecule.refcode}): Ring(f{self.atoms_ids})")
+
     def _attr_setters(self) -> Dict[str, Callable]:
         return {}
+
+    def _joint_rings(self, expand: bool = True, aromatic: bool = False) -> set["Ring"]:
+        """get rings joint with this ring"""
+        rings = {self} if not aromatic or self.is_aromatic else {}
+
+        while len(rings) != len(rings := {
+            ar for ring in rings for atom in ring.atoms for ar in atom.rings if not aromatic or ar.is_aromatic}):
+            if not expand:
+                break
+
+        return rings
 
     @property
     def atoms(self) -> list[Atom]:
@@ -3729,6 +3913,35 @@ class Ring(Wrapper, ABC):
         return self.min_center2atoms / self.max_center2atoms
 
     @property
+    def expand_aromatic_ring(self) -> "ExpandRing":
+        """ aromatic ExpandRing containing the ring """
+        if not self.is_aromatic:
+            raise AttributeError("the non-aromatic ring can't get the attribute expand_aromatic_ring")
+
+        return ExpandRing(*self._joint_rings(aromatic=True))
+
+    @property
+    def expand_ring(self) -> "ExpandRing":
+        """ ExpandRing containing this ring """
+        return ExpandRing(*self._joint_rings())
+
+    @property
+    def ring_key(self) -> BaseNum:
+        """ return a unique Base number to represent the priority of the ring, where the 1st digit
+        in 128-based number represent aromatic (1) or aliphatic (2) ring, the subsequent each digit
+        represent the atomic number of sorted_atoms"""
+        return BaseNum(([1] if self.is_aromatic else [2]) + [a.atomic_number for a in self.sorted_atoms])
+
+    @property
+    def prime_atom(self) -> Atom:
+        """ get the prime atom with most prior """
+        return min([a for a in self.atoms], key=self.sort_key)
+
+    def has_same_atoms(self, other: "Ring") -> bool:
+        """ Check whether this ring has same atoms with other one """
+        return True if set(self.atoms_ids) & set(other.atoms_ids) else False
+
+    @property
     def is_aromatic(self) -> bool:
         return self.ob_ring.IsAromatic()
 
@@ -3747,6 +3960,29 @@ class Ring(Wrapper, ABC):
         else:
             return False
 
+    def is_graph_identical_to(self, other):
+        return self.ring_key == other.ring_key
+
+    def is_graph_latter_to(self, other):
+        return self.ring_key > other.ring_key
+
+    def is_graph_prior_to(self, other) -> bool:
+        return self.ring_key < other.ring_key
+
+    @property
+    def joint_aromatic_rings(self) -> list["Ring"]:
+        """ get aromatic rings joint with this ring """
+        return [ring for ring in self.joint_rings if ring.is_aromatic]
+
+    @property
+    def joint_rings(self) -> list["Ring"]:
+        """get rings joint with this ring"""
+        return [ring for ring in self._joint_rings(False) if ring is not self]
+
+    def intersection_atoms(self, other: "Ring"):
+        """ Get intersecting atom among this ring and other """
+        return [self.molecule.atom(ob_id) for ob_id in set(self.atoms_ids) & set(other.atoms_ids)]
+
     @property
     def molecule(self) -> Molecule:
         return self.data.get('mol')
@@ -3760,6 +3996,12 @@ class Ring(Wrapper, ABC):
     def min_center2atoms(self) -> float:
         """ the minimum distance from center to atoms """
         return min(self.dist_center2atoms)
+
+    def neigh_atoms(self, atom: Atom) -> (Atom, Atom):
+        if atom not in self.atoms:
+            raise ValueError('the given atom not in the ring!')
+
+        return [a for a in atom.neighbours if a in self.atoms]
 
     @property
     def normal_vector(self) -> np.ndarray:
@@ -3795,6 +4037,7 @@ class Ring(Wrapper, ABC):
 
     @property
     def ordered_atoms(self) -> list[Atom]:
+        """ TODO: might Deprecate """
         atoms = {a.ob_id: a for a in self.atoms}
         atom = None
 
@@ -3810,15 +4053,121 @@ class Ring(Wrapper, ABC):
 
         return ordered_atoms
 
+    def clockwise_atoms(
+            self, first_atom: Atom, which: Literal['right', 'left', 'both', 'min', 'max'] = "right"
+    ) -> (list[Atom], Optional[list[Atom]]):
+        """
+        get clockwise atoms from the given first atom
+        Args:
+            first_atom:
+            which: select from 'right', 'left', 'both', 'min' or 'max'
+        """
+        def sort_clock(atoms: list[Atom]):
+            return BaseNum([a.atomic_number for a in atoms])
+
+        def get_atoms(idx: Literal[0, 1]):
+            atoms = [first_atom, self.neigh_atoms(first_atom)[idx]]
+            while len(atoms) < self.size:
+                atoms.append([a for a in self.neigh_atoms(atoms[-1]) if a not in atoms][0])
+
+            return atoms
+
+        if first_atom not in self.atoms:
+            raise ValueError('the given atom not in the Ring')
+
+        if which == 'right':
+            return get_atoms(0)
+        elif which == 'left':
+            return get_atoms(1)
+        else:
+            clockwise_atoms = get_atoms(0), get_atoms(1)
+            if which == 'both':
+                return clockwise_atoms
+            elif which == 'min':
+                return min(clockwise_atoms, key=sort_clock)
+            elif which == 'max':
+                return max(clockwise_atoms, key=sort_clock)
+            else:
+                ValueError("the which should select from 'right', 'left', 'both', 'min' or 'max'")
+
     @property
     def size(self):
         return self.ob_ring.Size()
+
+    def sort_index(self, atom: Atom) -> int:
+        """ get the index of given in the sorted atoms list """
+        return self.sorted_atoms.index(atom)
+
+    @property
+    def sorted_atoms(self) -> list[Atom]:
+        """ Get a list of atoms from the prior to the latter, the priority of atoms given by Ring.sort_key() method """
+        return self.clockwise_atoms(self.prime_atom, "min")
+
+    def sort_key(self, atom: Atom) -> BaseNum:
+        """
+        generate a unique int values to represent the priority of the given atom in the ring.
+        The int value is transformed into a 128-based number (the known elements in our world is 120).
+        The 128-based number is generated by putting the atomic number of each atom in the ring as one
+        of the digits of the 128-based number, where the atomic number of the given atoms is the 1st digit
+        and the sequential digit is given by the sequential atoms. The question raised that there could be
+        two atom sequences, clockwise or anticlockwise, which should be the reference to generate the unique
+        key? The answer is the sequences with minimum key.
+        """
+        return min([BaseNum([a.atomic_number for a in atoms]) for atoms in self.clockwise_atoms(atom, "both")])
 
     @property
     def vector_center2atoms(self) -> np.ndarray:
         """ the vectors from geometric center to atoms """
         center = self.center
         return np.array([pos_atom - center for pos_atom in self.coordinates])
+
+
+class ExpandRing(ObjCollection, ABC):
+    """ a collection of Ring objects which are joint together by edge(bond) """
+    def __init__(self, *rings: Ring):
+        if any(r.molecule is not rings[0].molecule for r in rings):
+            raise AttributeError('all rings in the ExpandRing must come from same Molecule')
+
+        super().__init__(*rings)
+
+    def kekulize(self):
+        """ Reorganize the atom types by kekulized format """
+        if self.is_aromatic:
+            # initializing by assigning all bond types to be 1
+            for bond in (bonds := self.bonds):
+                bond.type = 0
+
+            seeing_bonds = [bonds[0]]
+            while any(not bond.type for bond in bonds):
+                for sb in seeing_bonds:
+                    if not sb.type:
+                        sb.type = 1 if any(jb.type == 2 for jb in sb.joint_bonds) else 2
+
+                seeing_bonds = list({sbjb for sb in seeing_bonds for sbjb in sb.joint_bonds
+                                     if not sbjb.type and sbjb in bonds})
+
+        else:
+            UserWarning("this ExpandRing is not aromatic, can't assign to be kekule format!")
+
+    @property
+    def atoms(self) -> list[Atom]:
+        return list({atom for ring in self.rings for atom in ring.atoms})
+
+    @property
+    def bonds(self) -> list[Bond]:
+        return list({bond for ring in self.rings for bond in ring.bonds})
+
+    @property
+    def is_aromatic(self):
+        return all(ring.is_aromatic for ring in self.rings)
+
+    @property
+    def molecule(self):
+        return self.rings[0].molecule
+
+    @property
+    def rings(self):
+        return self._objs
 
 
 class Angle(MolLinker, ABC):
