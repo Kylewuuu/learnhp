@@ -6,18 +6,22 @@ mol2 = hp.Molecule.read_from("/home/kyle/learnhp/tut3/hotpot/tutorial/tut3/input
 
 # 查看对应文件记录的晶体结构信息，包括晶胞类型，晶胞参数，空间点群，晶胞体积和晶胞密度
 cryst1 = mol1.crystal()  # Get the Crystal1 containing the Molecule
-print(cryst1.lattice_type)  # 晶体1的晶胞类型
-print(cryst1.lattice_params)  # 晶体1的晶胞参数
-print(cryst1.space_group)  # 晶体1的空间点群
-print(cryst1.volume)  # 晶体1的晶胞体积
-print(cryst1.density)  # 晶体1的晶胞密度
+print('晶体IRMOF-1结构信息如下:')
+print("晶胞类型：%s" %(cryst1.lattice_type))  # 晶体1的晶胞类型
+print('晶胞参数：', cryst1.lattice_params)  # 晶体1的晶胞参数
+print("空间点群：%s" %(cryst1.space_group))  # 晶体1的空间点群
+print("晶胞体积：%.2e" %(cryst1.volume))  # 晶体1的晶胞体积
+print('晶胞密度：%.2e' %(cryst1.density)) # 晶体1的晶胞密度
+
+print('\n')
 
 cryst2 = mol2.crystal()  # Get the Crystal2 containing the Molecule
-print(cryst2.lattice_type)  # 晶体2的晶胞类型
-print(cryst2.lattice_params)  # 晶体2的晶胞参数
-print(cryst2.space_group)  # 晶体2的空间点群
-print(cryst2.volume)  # 晶体2的晶胞体积
-print(cryst2.density)  # 晶体2的晶胞密度
+print("晶体MIL-101(Cr)结构信息如下:")
+print("晶胞类型：%s" %(cryst2.lattice_type))  # 晶体2的晶胞类型
+print('晶胞参数：', cryst2.lattice_params)  # 晶体2的晶胞参数
+print("空间点群：%s" %(cryst2.space_group))  # 晶体2的空间点群
+print("晶胞体积：%.2e" %(cryst2.volume))  # 晶体2的晶胞体积
+print('晶胞密度：%.2e' %(cryst2.density)) # 晶体2的晶胞密度
 
 # 使得Molecule在晶胞内复制，按照对称元素填满整个晶胞
 pack_mol1 = cryst1.pack_molecule
