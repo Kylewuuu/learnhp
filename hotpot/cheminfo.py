@@ -1479,22 +1479,8 @@ class Molecule(Wrapper, ABC):
     @property
     def components(self):
         """ get all fragments don't link each by any bonds """
-        # Add temp label for each atom first
-        preserve_data = self._preserve_atoms_data()
-
-        components = [self.__class__(obc) for obc in self.ob_mol.Separate()]
-
-        # Transfer the parent data attr to the children
-        for c in components:
-            for a in c.atoms:
-                a.update_attr_data(preserve_data[a.temp_label])
-                a.remove_ob_data('temp_label')
-
-        # remove temp labels of all atoms
-        self._delete_atoms_temp_label()
-
-        return components
-
+        return [self.__class__(obc) for obc in self.ob_mol.Separate()]
+        
     @property
     def conformer_counts(self) -> int:
         """ The number of conformers in the molecule """
