@@ -1479,7 +1479,6 @@ class Molecule(Wrapper, ABC):
     @property
     def components(self):
         """ get all fragments don't link each by any bonds """
-        # Add temp label for each atom first
         return [self.__class__(obc) for obc in self.ob_mol.Separate()]
         
     @property
