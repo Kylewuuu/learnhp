@@ -11,7 +11,7 @@ print("晶胞类型：%s" %(cryst1.lattice_type))  # 晶体1的晶胞类型
 print('晶胞参数：', cryst1.lattice_params)  # 晶体1的晶胞参数
 print("空间点群：%s" %(cryst1.space_group))  # 晶体1的空间点群
 print("晶胞体积：%.2e" %(cryst1.volume))  # 晶体1的晶胞体积
-print('晶胞密度：%.2e' %(cryst1.density)) # 晶体1的晶胞密度
+print('晶胞密度：%.2e' %(cryst1.density))  # 晶体1的晶胞密度
 
 print('\n')
 
@@ -31,31 +31,20 @@ pack_mol2 = cryst2.pack_molecule
 pack_mol1.writefile('cif', '/home/kyle/learnhp/tut3/hotpot/tutorial/tut3/output_files/pack_IRMOF-1.cif')
 pack_mol2.writefile('cif', '/home/kyle/learnhp/tut3/hotpot/tutorial/tut3/output_files/pack_MIL-101(Cr).cif')
 
-# 遍历mol1中的原子，找到atomic_number为30的所有原子对象，并删除它们
-atoms_to_remove1 = [atom for atom in mol1.atoms if atom.atomic_number == 30]
+# 遍历mol1 mol2中的原子，找到atomic_number为30 24的所有原子对象，并删除它们
+atoms_to_remove1 = [atom for atom in pack_mol1.atoms if atom.atomic_number == 30]
 for atom in atoms_to_remove1:
-    mol1.remove_atoms(atom, remove_hydrogens=False)  # 将整数ob_id_to_remove改为列表[atom]
-cryst1_new = mol1.crystal()
-pack_mol1_new = cryst1_new.pack_molecule
+    pack_mol1.remove_atoms(atom)
 
-# 遍历mol2中的原子，找到atomic_number为24的所有原子对象，并删除它们
-atoms_to_remove2 = [atom for atom in mol2.atoms if atom.atomic_number == 24]
+atoms_to_remove2 = [atom for atom in pack_mol2.atoms if atom.atomic_number == 24]
 for atom in atoms_to_remove2:
-    mol2.remove_atoms(atom, remove_hydrogens=False)  # 将整数ob_id_to_remove改为列表[atom]
-cryst2_new = mol2.crystal()
-pack_mol2_new = cryst2_new.pack_molecule
+    pack_mol2.remove_atoms(atom)
 
 '提取剩余晶体中的所有有机物，并以mol2文件保存到hotpot/tutorial/tut3/output_files文件底下'
-# 检查Molecule对象是否成功创建
-if pack_mol1_new is not None and pack_mol2_new is not None:  # and pack_mol2_new is not None
-    # 检查是否存在有机物，如果存在则提取并保存为mol2文件
-    if pack_mol1_new.is_organic:
-        org_mol1 = pack_mol1_new.to_mix_mol()
-        org_mol1.writefile('mol2', '/home/kyle/learnhp/tut3/hotpot/tutorial/tut3/output_files/IRMOF-1_organic.mol2')
+org_mol1 = [c for c in pack_mol1.components if c.is_organic]
+for i, mol in enumerate(org_mol1):
+    mol.writefile('mol2', f'/home/kyle/learnhp/tut3/hotpot/tutorial/tut3/output_files/IRMOF_organic/IRMOF_org{i}.mol2')
 
-    if pack_mol2_new.is_organic:
-        org_mol2 = pack_mol2_new.to_mix_mol()
-        org_mol2.writefile('mol2', '/home/kyle/learnhp/tut3/hotpot/tutorial/tut3/output_files/MIL-101(Cr)_organic.mol2')
-
-else:
-    print("Failed to create Molecule object from input files2.")
+org_mol2 = [d for d in pack_mol2.components if d.is_organic]
+for j, mol in enumerate(org_mol2):
+    mol.writefile('mol2', f'/home/kyle/learnhp/tut3/hotpot/tutorial/tut3/output_files/MIL-101(Cr)_organic/MIL-101(Cr)_org{j}.mol2')
